@@ -11,11 +11,13 @@ Adémas se genera la visualización de la localización de las escuelas mediante
 ### Requerimientos 📋
 
 Lenguaje R.
+
 escuelas-publicas.csv
 
 #### Resultados obtenidos
 
 Mapa de calor agrupado por nivel educativo.
+
 Mapa de calor con todas las escuelas.
 
 
