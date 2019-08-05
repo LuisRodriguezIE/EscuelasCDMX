@@ -1,0 +1,210 @@
+#------------------------------ ###### ---------------------------------|
+#    -- ================================================================|
+#    -- Author:		    <Luis A. Rodriguez G.>           									|
+#    -- Create date:  <01/08/2019>										                  |
+#    -- Last modification date:  <01/08/2019>							              |
+#    -- Description:	<Programa Genera Mallas Escuelas.>              |
+#    -- ================================================================|
+#------------------------------ ###### ---------------------------------|
+
+#####                                   rm(list=ls())
+
+########                 Librerias, Descripción ########  
+
+library(sf)              # Simple Features for R
+library(dplyr)           # Grammar of Data Manipulation
+library(tidyr)           # Easily Tidy Data with 'spread()' and 'gather()' 
+library(sp)              # Classes and Methods for Spatial Data
+library(raster)          # Geographic Data Analysis and Modeling
+library(rgeos)           # Interface to Geometry Engine
+library(rgbif)           # Interface to the Global 'Biodiversity' Information Facility API
+library(viridis)         # Default Color Maps from 'matplotlib'
+library(gridExtra)       # Miscellaneous Functions for "Grid" Graphics
+library(rasterVis)       # Visualization Methods for Raster Data
+
+
+#####                    rm(list=ls())
+set.seed(1)
+
+######################################## FUNCIONES ########################################
+ModificaAtractor <- function(CapaAtractor, PoligonoBase, sq_grid_c){
+  
+  AtractorDF <- fortify(CapaAtractor)
+  
+  AtractorDF <- AtractorDF%>%
+    distinct(long, lat, .keep_all = TRUE)   
+  
+  colnames(AtractorDF)[which(names(AtractorDF) == "id")] <- "Identificador"
+  
+  coordinates(AtractorDF) <- ~ long + lat
+  projection(AtractorDF)  <- projection(sq_grid_c)
+  AtractorShape <- spTransform(AtractorDF, projection(PoligonoBase))
+  
+  return(AtractorShape)
+  
+}
+make_grid <- function(x, type, cell_width, cell_area, clip = FALSE) {
+  if (!type %in% c("square", "hexagonal")) {
+    stop("El tipo debe ser 'cuadrado' o 'hexagonal'")
+  }
+  
+  if (missing(cell_width)) {
+    if (missing(cell_area)) {
+      stop("Se debe definir el tamaño del área")
+    } else {
+      if (type == "square") {
+        cell_width <- sqrt(cell_area)
+      } else if (type == "hexagonal") {
+        cell_width <- sqrt(2 * cell_area / sqrt(3))
+      }
+    }
+  }
+  # Define el tamaño de las celdas.
+  ext <- as(extent(x) + cell_width, "SpatialPolygons")
+  projection(ext) <- projection(x)
+  # Genera el mallado
+  if (type == "square") {
+    g <- raster(ext, resolution = cell_width)
+    g <- as(g, "SpatialPolygons")
+  } else if (type == "hexagonal") {
+    # Genera el vector de centros poligonos.
+    g <- spsample(ext, type = "hexagonal", cellsize = cell_width, offset = c(0, 0))
+    # Convierte los centros a poligonos. 
+    g <- HexPoints2SpatialPolygons(g, dx = cell_width)
+  }
+  
+  # Define los bordes al área de estudio. 
+  if (clip) {
+    g <- gIntersection(g, x, byid = TRUE)
+  } else {
+    g <- g[x, ]
+  }
+  # Limpia los id.
+  row.names(g) <- as.character(1:length(g))
+  return(g)
+}
+######################################## PROCESAMIENTO SHAPEFILE ########################################
+
+# Ruta de la Shape File
+DirectorioShapeFiles <- "ShapeFileCDMX"
+NombrePoligonoBase <- "09ent.shp"
+
+TipoRed      <- "square"   # Opciones: "square", "hexagonal"
+AreaPoligono <- 1000000    # En metros, ejemplo: 300m * 300m = 90000
+
+setwd(DirectorioShapeFiles) 
+PoligonoBase <- readOGR(NombrePoligonoBase)
+PoligonoBase <- spTransform(PoligonoBase, CRS("+init=epsg:4326 +proj=utm +zone=13N +datum=WGS84 +units=m"))
+
+#writeOGR(PoligonoBase, '.', layer = "PoligonoBase", driver = "ESRI Shapefile")
+
+sq_grid_c <- make_grid(PoligonoBase, type = TipoRed, cell_area = AreaPoligono, clip = TRUE)
+plot(PoligonoBase, col = "grey50", bg = "light blue", axes = FALSE)
+plot(sq_grid_c, border = "orange", add = TRUE)
+
+######################################## PROCESAMIENTO DATA ########################################
+
+# Ruta de los Atractores
+DirectorioAtractores <- "Datos Abiertos"
+setwd(DirectorioAtractores)
+NombreAtractor       <- "escuelas-publicas.csv"
+Escuelas <- read.csv(NombreAtractor, header = TRUE, sep = ";")
+
+Escuelas <- Escuelas%>%
+  mutate(NivelEducativo = tolower(iconv(trimws(Nombre), from = "latin1", to = 'ASCII//TRANSLIT')),
+         NivelEducativo = str_extract(NivelEducativo,'pree|prim|secu'))%>%
+  mutate(NivelEducativo = case_when(NivelEducativo == 'pree' ~ 'PREESCOLAR',
+                                    NivelEducativo == 'prim' ~ 'PRIMARIA',
+                                    NivelEducativo == 'secu' ~ 'SECUNDARIA',
+                                    TRUE ~ 'OTRAS'))
+EscuelaReduce <- subset(Escuelas, select = c("Nombre", "Latitud", "Longitud", "Domicilio", "NivelEducativo"))
+
+EstadisticaEscolar <- EscuelaReduce%>%
+  dplyr::group_by(NivelEducativo)%>%
+  dplyr::summarize(NumeroEscuelas = n())
+
+##### Creación de la ShapeFile Puntos Escuelas #####
+
+EscuelaReduce <- EscuelaReduce%>%
+  filter(!is.na(Longitud) & !is.na(Latitud))%>%
+  distinct(Longitud, Latitud, .keep_all = TRUE)
+
+EscuelaShape <- subset(EscuelaReduce, select = c("Nombre", "Latitud", "Longitud", "NivelEducativo"))
+
+coordinates(EscuelaShape) <- ~ Longitud + Latitud
+proj4string(EscuelaShape) <- CRS('+init=EPSG:4326 +proj=longlat +zone=13N +datum=WGS84 +units=m')
+EscuelaShape <- spTransform(EscuelaShape, projection(sq_grid_c))
+
+# writeOGR(EscuelaShape, '.', layer = "EscuelasUbicacion", driver = "ESRI Shapefile")
+
+AtractorShape <- EscuelaShape
+
+##### Cálculo de densidad de puntos.
+
+NivelEducativo <- c("PREESCOLAR", "PRIMARIA", "SECUNDARIA")
+fill_missing  <- expand.grid(id = row.names(sq_grid_c), NivelEducativo = NivelEducativo, stringsAsFactors = FALSE)
+
+point_density <- over(sq_grid_c, AtractorShape, returnList = TRUE)%>%
+  plyr::ldply(.fun = function(x) x, .id = "id") %>%
+  mutate(id = as.character(id)) %>%
+  count(id, NivelEducativo)%>% 
+  left_join(fill_missing, ., by = c("id", "NivelEducativo"))%>%
+  mutate(n = as.integer(ifelse(is.na(n), 0, n)))%>%
+  spread(NivelEducativo, n, fill = -1)%>%
+  SpatialPolygonsDataFrame(sq_grid_c, .)
+
+spplot(point_density, NivelEducativo, 
+       main = "Número de Escuelas por Cuadrante de 1Km2",
+       col.regions = c("grey50", viridis(255)),
+       colorkey = list(
+         at = seq(0, 10, length.out = 21),
+         labels = list(
+           at = seq(0, 10, length.out = 11),
+           labels = seq(0, 10, length.out = 11)
+         )
+       ),
+       xlim = bbexpand(bbox(point_density)[1, ], 0.01),
+       ylim = bbexpand(bbox(point_density)[2, ], 0.01))
+
+############################################################################################
+############################ Todas las Escuelas en un solo mapa ############################
+############################################################################################
+
+##### Creación de la ShapeFile #####
+
+EscuelaReduce <- EscuelaReduce%>%
+  filter(!is.na(Longitud) & !is.na(Latitud))%>%
+  distinct(Longitud, Latitud, .keep_all = TRUE)
+
+EscuelaShape <- subset(EscuelaReduce, select = c("Nombre", "Latitud", "Longitud"))
+
+coordinates(EscuelaShape) <- ~ Longitud + Latitud
+proj4string(EscuelaShape) <- CRS('+init=EPSG:4326 +proj=longlat +zone=13N +datum=WGS84 +units=m')
+EscuelaShape <- spTransform(EscuelaShape, projection(sq_grid_c))
+
+AtractorShape <- EscuelaShape
+
+##### Densidad de puntos #####
+
+fill_missing  <- expand.grid(id = row.names(sq_grid_c), stringsAsFactors = FALSE)
+
+point_density <- over(sq_grid_c, AtractorShape, returnList = TRUE)%>%
+  plyr::ldply(.fun = function(x) x, .id = "id") %>%
+  mutate(id = as.character(id)) %>%
+  count(id)%>% 
+  left_join(fill_missing, ., by = c("id"))%>%
+  mutate(n = as.integer(ifelse(is.na(n), 0, n)))%>%
+  dplyr::select(n)%>%
+  SpatialPolygonsDataFrame(sq_grid_c, .)
+
+spplot(point_density ,main = "Número de Escuelas por Cuadrante de 1Km2",
+       col.regions = c("grey50", viridis(255)),
+       colorkey = list(
+         at = seq(0, 20, length.out = 21),
+         labels = list(
+           at = seq(0, 20, length.out = 11),
+           labels = seq(0, 20, length.out = 11)
+         )
+       ),
+       xlim = bbexpand(bbox(point_density)[1, ], 0.01),
+       ylim = bbexpand(bbox(point_density)[2, ], 0.01))
